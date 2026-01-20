@@ -123,13 +123,13 @@ class ApiKeyDialog(QDialog):
 
         layout = QVBoxLayout()
 
-        self.label = QLabel("Please enter your API Key:")
+        self.label = QLabel("Please enter your MapBox Token:")
         layout.addWidget(self.label)
 
         self.lineEdit = QLineEdit()
         layout.addWidget(self.lineEdit)
 
-        self.noteLabel = QLabel("Note: You can get your API Key from:")
+        self.noteLabel = QLabel("Note: You can get your MapBox Token from:")
         layout.addWidget(self.noteLabel)
 
         self.linkLabel = QLabel('<a href="https://docs.mapbox.com/help/getting-started/access-tokens/">www.mapbox.com</a>')
