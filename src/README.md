@@ -10,6 +10,7 @@ The plugin’s workflow consists of three automated steps:\n
 2. Compute resilience values for each sampled point, considering feature redundancy and accessibility;\n
 3. Produce attribute table outputs for further GIS (heatmaps) or CSV analysis.\n
 \n
+\n
 The method was first introduced in:\n
 Pintacuda, L., Carta, S., Turchi, T., Sabiu, M. (2023) QRES: A QGIS plugin to calculate resilience based on the proximity of urban resources, in Responsive Cities: Collective Intelligence Design Symposium Proceedings, IAAC, Barcelona.\n
 \n
