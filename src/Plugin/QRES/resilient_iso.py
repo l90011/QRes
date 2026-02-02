@@ -165,7 +165,7 @@ class ResilientIsochrones:
             QCoreApplication.installTranslator(self.translator)
 
         self.actions = []
-        self.menu = self.tr("&ResilienceMapper")
+        self.menu = self.tr("&QRES - ResilienceMapper")
 
         self.first_start = None
         self.point_layer = None
@@ -209,7 +209,7 @@ class ResilientIsochrones:
         icon_path = os.path.join(self.plugin_dir, "icon.png")
         self.add_action(
             icon_path,
-            text=self.tr("Run ResilienceMapper"),
+            text=self.tr("QRES - ResilienceMapper"),
             callback=self.run,
             parent=self.iface.mainWindow(),
         )
@@ -217,7 +217,7 @@ class ResilientIsochrones:
 
     def unload(self):
         for action in self.actions:
-            self.iface.removePluginMenu(self.tr("&ResilienceMapper"), action)
+            self.iface.removePluginMenu(self.tr("&QRES - ResilienceMapper"), action)
             self.iface.removeToolBarIcon(action)
 
     # ----------------------------

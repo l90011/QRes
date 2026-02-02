@@ -1,8 +1,11 @@
 [general]
-name=ResilienceMapper
+name=QRES - ResilienceMapper
 qgisMinimumVersion=3.0
 description=Calculates and maps urban resilience values based on isochrone accessibility.
 version=1.0.0
+repository=https://github.com/l90011/QRes
+homepage=https://github.com/l90011/QRes
+tracker=https://github.com/l90011/QRes/issues
 author=MKS DTECH, Luigi Pintacuda, Silvio Carta, Tommaso Turchi
 email=l.pintacuda@herts.ac.uk
 about=QRES is a QGIS plugin designed to assess the resilience of urban areas by analysing the spatial accessibility of essential features such as schools, parks, hospitals, and public transport. Unlike traditional distance based methods, QRES uses isochrones, areas reachable within equal travel times, to calculate resilience values that better reflect real world conditions. The workflow includes generating isochrones using Mapbox, computing resilience values for each sampled point, and producing attribute table outputs for GIS analysis and CSV export. The method was first introduced by Pintacuda L, Carta S, Turchi T, and Sabiu M in 2023 at the Responsive Cities Symposium at IAAC Barcelona. Processing large datasets may take time and a progress bar is displayed during execution. If processing is interrupted, previously calculated points retain their values and missing points can be recalculated separately. A Mapbox access token is required to generate isochrones and Mapbox provides a free usage tier suitable for most urban scale analyses.
