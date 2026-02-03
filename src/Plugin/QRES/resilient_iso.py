@@ -115,7 +115,7 @@ PROFILES = {
     "schools": {"profile": "walking", "intervals": [5, 15, 30]},
     "kindergarden": {"profile": "walking", "intervals": [5, 15, 30]},
     "transportation": {"profile": "walking", "intervals": [5, 15, 30]},
-    "airports": {"profile": "driving", "intervals": [15, 30, 60]},
+    "airports": {"profile": "driving", "intervals": [30, 60, 90]},
     "leisure_and_parks": {"profile": "walking", "intervals": [5, 15, 30]},
     "shops": {"profile": "walking", "intervals": [5, 15, 30]},
     "higher_education": {"profile": "walking", "intervals": [5, 15, 30]},
