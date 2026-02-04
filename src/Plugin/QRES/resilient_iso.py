@@ -486,7 +486,7 @@ out body;
 out skel qt;
 """.strip()
 
-    response = requests.get(url, params={"data": data_query}, timeout=120)
+    response = requests.get(url, params={"data": data_query}, timeout=240)
     if response.status_code != 200:
         return []
 
