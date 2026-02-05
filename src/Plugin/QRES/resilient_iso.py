@@ -46,6 +46,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsCoordinateReferenceSystem,
     QgsField,
+    QgsGeometry,
     QgsProject,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -56,6 +57,11 @@ from .resilient_iso_dialog import ResilientIsochronesDialog
 
 # Plugin resources (Qt .qrc compiled into resources.py)
 from .resources import *  # noqa: F401,F403
+
+# OSM cache modules
+from .osm_cache_manager import OSMCacheManager
+from .osm_downloader import OSMDownloader
+from .osm_local_query import LocalOSMQuery
 
 
 # ----------------------------
@@ -82,22 +88,8 @@ except Exception:
 
 # Polygon simplification tolerance in degrees
 # ~0.002 ≈ 220 meters at equator
-# Increase this value if you still get HTTP 504 timeouts
-# Higher values = faster queries but slightly less precise boundaries
+# Used for isochrone polygons to reduce coordinate count
 POLYGON_SIMPLIFICATION_TOLERANCE = 0.002
-
-# Overpass API timeout settings (in seconds)
-# Normal mode: 60s (1 minute) - increase if queries are timing out
-# NULL-only mode: 180s (3 minutes) - set in run() method
-OVERPASS_TIMEOUT_NORMAL = 60
-
-# Rate limiting: delay between Overpass API requests (seconds)
-# Helps avoid HTTP 429 (Too Many Requests) errors
-OVERPASS_REQUEST_DELAY = 2.0
-
-# Retry settings for rate limiting
-OVERPASS_MAX_RETRIES = 3
-OVERPASS_RETRY_DELAY = 10  # Initial delay in seconds, doubles on each retry
 
 FACILITIES = {
     "schools": ['"amenity"="school"'],
@@ -120,7 +112,7 @@ PROFILES = {
     "schools": {"profile": "walking", "intervals": [5, 15, 30]},
     "kindergarden": {"profile": "walking", "intervals": [5, 15, 30]},
     "transportation": {"profile": "walking", "intervals": [5, 15, 30]},
-    "airports": {"profile": "driving", "intervals": [30, 60, 90]},
+    "airports": {"profile": "driving", "intervals": [20, 40, 60]},
     "leisure_and_parks": {"profile": "walking", "intervals": [5, 15, 30]},
     "shops": {"profile": "walking", "intervals": [5, 15, 30]},
     "higher_education": {"profile": "walking", "intervals": [5, 15, 30]},
@@ -177,6 +169,9 @@ class ResilientIsochrones:
 
         # Dialog from Plugin Builder
         self.dlg = ResilientIsochronesDialog()
+        
+        # Set refresh OSM callback
+        self.dlg.set_refresh_osm_callback(self._refresh_osm_cache)
 
         # i18n (kept compatible with older file naming)
         locale = QSettings().value("locale/userLocale", "")[:2]
@@ -302,18 +297,153 @@ class ResilientIsochrones:
             QMessageBox.critical(self.iface.mainWindow(), "Invalid layer", "Selected layer must be a point vector layer.")
             return
 
-        # Check if we should process only NULL points
-        process_only_null = self.dlg.processNullCheckBox.isChecked()
-        null_only_timeout = 180 if process_only_null else None
-
-        # Setup logging
+        # Setup logging early
         log_file = self._setup_logging()
         logging.info("="*60)
-        logging.info(f"Starting resilience calculation at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logging.info(f"QRES Plugin started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logging.info(f"Layer: {selected_layer_name}")
+
+        # Initialize OSM cache in system directory
+        cache_manager = OSMCacheManager()
+        
+        # Get study area from layer extent
+        geometry_wkt, crs_string, bbox = cache_manager.get_study_area_from_layer(self.point_layer)
+        logging.info(f"Study area CRS: {crs_string}")
+        logging.info(f"Study area bbox: {bbox}")
+        
+        # Check if cache exists and is valid
+        if not cache_manager.is_valid_for_geometry(geometry_wkt, crs_string, bbox):
+            logging.info("OSM cache not found or invalid for this geometry, prompting for download...")
+            
+            reply = QMessageBox.question(
+                self.iface.mainWindow(),
+                "Download OSM Data",
+                "OSM data cache is not available for this study area.\n\n"
+                "This will download OpenStreetMap data once and store it locally.\n"
+                "Future analyses will use the cached data.\n\n"
+                "Download now?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply != QMessageBox.Yes:
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "Operation Canceled",
+                    "Cannot proceed without OSM data cache."
+                )
+                return
+            
+            # Transform bbox to EPSG:4326 for Overpass
+            layer_crs = self.point_layer.crs()
+            if layer_crs.authid() != "EPSG:4326":
+                transform = QgsCoordinateTransform(
+                    layer_crs,
+                    QgsCoordinateReferenceSystem("EPSG:4326"),
+                    QgsProject.instance()
+                )
+                rect = QgsGeometry.fromRect(self.point_layer.extent())
+                rect.transform(transform)
+                extent_4326 = rect.boundingBox()
+                bbox_4326 = {
+                    "xmin": extent_4326.xMinimum(),
+                    "ymin": extent_4326.yMinimum(),
+                    "xmax": extent_4326.xMaximum(),
+                    "ymax": extent_4326.yMaximum(),
+                }
+            else:
+                bbox_4326 = bbox
+            
+            logging.info(f"Study area bbox (EPSG:4326): {bbox_4326}")
+            logging.info(f"Downloading OSM data for {len(selected_facility_keys)} categories...")
+            
+            # Download OSM data
+            downloader = OSMDownloader()
+            
+            download_progress = QProgressDialog(
+                "Downloading OSM data...",
+                "Cancel",
+                0,
+                len(selected_facility_keys),
+                self.iface.mainWindow()
+            )
+            download_progress.setWindowModality(Qt.WindowModal)
+            download_progress.setWindowTitle("Downloading OSM Data")
+            
+            def progress_callback(current, total, message):
+                download_progress.setValue(current)
+                download_progress.setLabelText(message)
+                QCoreApplication.processEvents()
+                if download_progress.wasCanceled():
+                    raise Exception("Download canceled by user")
+            
+            try:
+                feature_counts = downloader.download_and_cache(
+                    bbox_4326,
+                    cache_manager.gpkg_file,
+                    self.point_layer.crs(),
+                    list(selected_facility_keys),
+                    progress_callback
+                )
+                
+                download_progress.reset()
+                
+                # Check if any data was successfully downloaded
+                total_features = sum(feature_counts.values())
+                if total_features == 0:
+                    QMessageBox.critical(
+                        self.iface.mainWindow(),
+                        "Download Failed",
+                        f"Failed to download OSM data.\n\n"
+                        f"Feature counts: {feature_counts}\n\n"
+                        f"Check the log file for details:\n{log_file}"
+                    )
+                    logging.error("Download failed - no features downloaded")
+                    return
+                
+                # Save metadata
+                osm_timestamp = datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+                cache_manager.save_metadata(
+                    geometry_wkt,
+                    crs_string,
+                    bbox,
+                    osm_timestamp,
+                    list(feature_counts.keys())  # Only categories with data
+                )
+                
+                summary = "OSM data downloaded successfully!\n\n"
+                for cat, count in feature_counts.items():
+                    summary += f"{cat}: {count} features\n"
+                
+                QMessageBox.information(
+                    self.iface.mainWindow(),
+                    "Download Complete",
+                    summary
+                )
+                
+                logging.info(f"OSM cache created: {feature_counts}")
+                
+            except Exception as e:
+                download_progress.reset()
+                logging.error(f"Failed to download OSM data: {e}")
+                QMessageBox.critical(
+                    self.iface.mainWindow(),
+                    "Download Failed",
+                    f"Failed to download OSM data:\n{e}"
+                )
+                return
+        else:
+            # Cache exists and is valid
+            cache_info = cache_manager.get_cache_info()
+            logging.info(f"Using existing OSM cache: {cache_info}")
+        
+        # Initialize local query layer
+        local_query = LocalOSMQuery(cache_manager.gpkg_file)
+
+        # Check if we should process only NULL points
+        process_only_null = self.dlg.processNullCheckBox.isChecked()
         logging.info(f"Process only NULL points: {process_only_null}")
-        if process_only_null:
-            logging.info(f"Using extended timeout: {null_only_timeout}s")
+        logging.info("="*60)
+        logging.info("Starting resilience calculation...")
 
         # Start editing
         self.point_layer.startEditing()
@@ -378,7 +508,7 @@ class ResilientIsochrones:
             progress.setLabelText(f"Processing point {processed + 1}/{total_operations} (ID: {feature_id})")
             logging.info(f"Processing point {processed + 1}/{total_operations} (ID: {feature_id}, coords: {pt.x():.4f}, {pt.y():.4f})")
 
-            resilience_dict = calculate_resilience(pt, selected_facilities, selected_profiles, token, null_only_timeout)
+            resilience_dict = calculate_resilience(pt, selected_facilities, selected_profiles, token, local_query, self.point_layer.crs())
 
             # Update fields
             changes = {}
@@ -388,6 +518,8 @@ class ResilientIsochrones:
                 idx = self.point_layer.fields().indexOf(key)
                 if idx >= 0:
                     changes[idx] = value
+            
+            logging.debug(f"  Updating {len(changes)} fields for feature {feature_id}: {list(changes.keys())}")
                     
             if resilience_dict.get("R_total", 0) > 0:
                 succeeded += 1
@@ -403,14 +535,22 @@ class ResilientIsochrones:
                 changes[y_idx] = pt.y()
 
             if changes:
-                self.point_layer.dataProvider().changeAttributeValues({feature_id: changes})
+                for field_idx, value in changes.items():
+                    success = self.point_layer.changeAttributeValue(feature_id, field_idx, value)
+                    if not success:
+                        logging.error(f"  Failed to change field {field_idx} to {value} for feature {feature_id}")
+                logging.debug(f"  Changed {len(changes)} attribute values")
 
             processed += 1
             progress.setValue(processed)
             QCoreApplication.processEvents()
 
         # Commit changes
-        self.point_layer.commitChanges()
+        commit_success = self.point_layer.commitChanges()
+        if commit_success:
+            logging.info(f"Successfully committed changes to layer")
+        else:
+            logging.error(f"Failed to commit changes: {self.point_layer.commitErrors()}")
         self.point_layer.triggerRepaint()
 
         progress.reset()
@@ -499,25 +639,85 @@ class ResilientIsochrones:
         if to_add:
             self.point_layer.dataProvider().addAttributes(to_add)
             self.point_layer.updateFields()
+    
+    def _refresh_osm_cache(self):
+        """Refresh OSM cache by deleting existing cache and prompting for re-download."""
+        cache_manager = OSMCacheManager()
+        
+        # Check if cache exists
+        if not cache_manager.cache_exists():
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "No Cache Found",
+                "No OSM cache exists yet. Cache will be created when you run the analysis."
+            )
+            return
+        
+        # Get cache info to show user
+        cache_info = cache_manager.get_cache_info()
+        if cache_info:
+            info_text = (
+                f"Current cache information:\n\n"
+                f"Created: {cache_info['created']}\n"
+                f"OSM Timestamp: {cache_info['osm_timestamp']}\n"
+                f"Categories: {', '.join(cache_info['categories'])}\n"
+                f"Size: {cache_info['cache_size_mb']:.2f} MB\n\n"
+                f"Are you sure you want to delete this cache?\n"
+                f"You will need to download OSM data again on the next analysis."
+            )
+        else:
+            info_text = (
+                "Delete the existing OSM cache?\n\n"
+                "You will need to download OSM data again on the next analysis."
+            )
+        
+        reply = QMessageBox.question(
+            self.iface.mainWindow(),
+            "Refresh OSM Cache",
+            info_text,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            cache_manager.clear_cache()
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Cache Cleared",
+                "OSM cache has been deleted successfully.\n\n"
+                "Fresh data will be downloaded on the next analysis."
+            )
+            logging.info("OSM cache cleared by user")
+        except Exception as e:
+            QMessageBox.critical(
+                self.iface.mainWindow(),
+                "Error",
+                f"Failed to clear OSM cache:\n{e}"
+            )
+            logging.error(f"Failed to clear OSM cache: {e}")
 
     def _setup_logging(self) -> str:
         """Setup logging to file and return log file path."""
-        # Use %LOCALAPPDATA%\QRES for logs (works for any user)
-        localappdata = os.getenv('LOCALAPPDATA')
-        if localappdata:
-            log_dir = os.path.join(localappdata, "QRES")
-        else:
-            # Fallback to plugin directory if LOCALAPPDATA not available
-            log_dir = os.path.join(self.plugin_dir, "logs")
+        # Use C:\ProgramData\QRes\logs for system-wide logging
+        log_dir = r"C:\ProgramData\QRes\logs"
         
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+        try:
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+        except Exception as e:
+            # Fallback to plugin directory if ProgramData not accessible
+            log_dir = os.path.join(self.plugin_dir, "logs")
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = os.path.join(log_dir, f"resilience_calc_{timestamp}.log")
         
-        # Clear any existing handlers
+        # Clear any existing handlers and close them properly
         for handler in logging.root.handlers[:]:
+            handler.close()
             logging.root.removeHandler(handler)
         
         logging.basicConfig(
@@ -535,25 +735,24 @@ class ResilientIsochrones:
 # ----------------------------
 # Core logic
 # ----------------------------
-def calculate_resilience(point, facilities, profiles, token: str, null_only_timeout: int = None) -> dict:
-    """Calculate resilience values for a point.
+def calculate_resilience(point, facilities, profiles, token: str, local_query: LocalOSMQuery, layer_crs: QgsCoordinateReferenceSystem) -> dict:
+    """Calculate resilience values for a point using local OSM cache.
     
     Args:
         point: QgsPoint with coordinates
         facilities: Dict of facility definitions
         profiles: Dict of profile configurations
         token: Mapbox API token
-        null_only_timeout: Optional longer timeout for NULL-only mode
+        local_query: LocalOSMQuery instance for querying cached data
     
     Returns:
-        dict: Resilience values, or None if calculation failed
+        dict: Resilience values
     """
     latitude = point.y()
     longitude = point.x()
     coordinates = [longitude, latitude]
 
     resilience_dict = {}
-    overpass_timeout = null_only_timeout if null_only_timeout else 60
     point_start_time = time.time()
 
     try:
@@ -574,11 +773,16 @@ def calculate_resilience(point, facilities, profiles, token: str, null_only_time
                 resilience_dict[f"R_{facility_key}"] = 0.0
                 continue
 
-            # Simplify polygons to avoid HTTP 414 errors (URI too long)
+            # Simplify polygons for faster local queries
             # Tolerance configured in POLYGON_SIMPLIFICATION_TOLERANCE
             isochrone_wkts = []
             total_coords_before = 0
             total_coords_after = 0
+            
+            # Setup CRS transformation: Mapbox returns EPSG:4326, transform to layer CRS
+            crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
+            transform_to_layer_crs = QgsCoordinateTransform(crs_4326, layer_crs, QgsProject.instance())
+            
             for idx, f in enumerate(isochrones_features):
                 geom = shapely.geometry.shape(f["geometry"])
                 original_coords = len(geom.exterior.coords)
@@ -588,25 +792,34 @@ def calculate_resilience(point, facilities, profiles, token: str, null_only_time
                 simplified_coords = len(simplified.exterior.coords)
                 total_coords_after += simplified_coords
                 logging.debug(f"{facility_key} isochrone {idx+1}: {original_coords} -> {simplified_coords} coords")
-                isochrone_wkts.append(simplified.wkt)
+                
+                # Transform from EPSG:4326 to layer CRS before querying OSM cache
+                qgs_geom = QgsGeometry.fromWkt(simplified.wkt)
+                bbox_before = qgs_geom.boundingBox()
+                logging.debug(f"    Isochrone {idx+1} bbox BEFORE transform (EPSG:4326): {bbox_before.xMinimum():.4f}, {bbox_before.yMinimum():.4f}, {bbox_before.xMaximum():.4f}, {bbox_before.yMaximum():.4f}")
+                
+                qgs_geom.transform(transform_to_layer_crs)
+                bbox_after = qgs_geom.boundingBox()
+                logging.debug(f"    Isochrone {idx+1} bbox AFTER transform ({layer_crs.authid()}): {bbox_after.xMinimum():.2f}, {bbox_after.yMinimum():.2f}, {bbox_after.xMaximum():.2f}, {bbox_after.yMaximum():.2f}")
+                
+                isochrone_wkts.append(qgs_geom.asWkt())
             
             logging.info(f"    Simplified {len(isochrones_features)} polygons: {total_coords_before} -> {total_coords_after} coords ({100*(1-total_coords_after/total_coords_before):.1f}% reduction)")
 
+            # Query local cache for each isochrone band
             all_facilities = []
-            overpass_total_time = 0
-            overpass_call_count = 0
+            query_total_time = 0
             for band_idx, wkt_poly in enumerate(isochrone_wkts):
-                polygon = wkt_polygon_to_overpass_format(wkt_poly)
-                poly_length = len(polygon)
-                logging.debug(f"{facility_key} band {band_idx+1}: polygon string length = {poly_length}")
-                for query in facilities[facility_key]:
-                    overpass_start = time.time()
-                    osm_data = get_osm_data_within_polygon(polygon, query, timeout=overpass_timeout)
-                    overpass_elapsed = time.time() - overpass_start
-                    overpass_total_time += overpass_elapsed
-                    overpass_call_count += 1
-                    logging.info(f"    Overpass query {overpass_call_count}: {overpass_elapsed:.1f}s, {len(osm_data)} results")
-                    all_facilities = [set(osm_data)] + all_facilities
+                query_start = time.time()
+                
+                # Query local cache (no HTTP calls!)
+                osm_names = local_query.get_named_features_within_polygon(facility_key, wkt_poly)
+                
+                query_elapsed = time.time() - query_start
+                query_total_time += query_elapsed
+                logging.info(f"    Local query {band_idx+1}: {query_elapsed:.3f}s, {len(osm_names)} results")
+                
+                all_facilities.append(set(osm_names))
 
             # remove overlaps between time bands
             for i in range(len(isochrone_wkts)):
@@ -620,12 +833,10 @@ def calculate_resilience(point, facilities, profiles, token: str, null_only_time
 
             r_value = counts[0] * 1.0 + counts[1] * 0.75 + counts[2] * 0.5
             resilience_dict[f"R_{facility_key}"] = r_value
+            logging.info(f"    R_{facility_key} = {r_value:.2f} (counts: {counts})")
             
             facility_elapsed = time.time() - facility_start_time
-            logging.info(f"    {facility_key} complete: {facility_elapsed:.1f}s total ({overpass_call_count} Overpass calls, {overpass_total_time:.1f}s)")
-            
-            # Small delay between facilities to reduce rate limiting
-            time.sleep(0.5)
+            logging.info(f"    {facility_key} complete: {facility_elapsed:.1f}s total ({len(isochrone_wkts)} local queries, {query_total_time:.3f}s)")
 
         if resilience_dict:
             resilience_dict["R_total"] = sum(resilience_dict.values()) / float(len(resilience_dict))
@@ -633,6 +844,7 @@ def calculate_resilience(point, facilities, profiles, token: str, null_only_time
             resilience_dict["R_total"] = 0.0
 
         point_elapsed = time.time() - point_start_time
+        logging.debug(f"  Resilience values: {resilience_dict}")
         logging.info(f"  Point complete: {point_elapsed:.1f}s total")
 
         return resilience_dict
@@ -646,6 +858,12 @@ def calculate_resilience(point, facilities, profiles, token: str, null_only_time
 
 
 def wkt_polygon_to_overpass_format(wkt_polygon: str) -> str:
+    """DEPRECATED: Convert WKT polygon to Overpass format.
+    
+    This function is no longer used as the plugin now uses local OSM cache
+    instead of making Overpass API calls during analysis.
+    Kept for backward compatibility only.
+    """
     polygon_coordinates_str = wkt_polygon.split("((")[1].split("))")[0]
     polygon_coordinates_pairs = polygon_coordinates_str.split(", ")
     overpass_pairs = [pair.split(" ")[::-1] for pair in polygon_coordinates_pairs]
@@ -653,7 +871,11 @@ def wkt_polygon_to_overpass_format(wkt_polygon: str) -> str:
 
 
 def get_osm_data_within_polygon(polygon_wkt: str, query: str, timeout: int = 240):
-    """Query Overpass API for OSM data within a polygon.
+    """DEPRECATED: Query Overpass API for OSM data within a polygon.
+    
+    This function is no longer used as the plugin now uses local OSM cache
+    instead of making Overpass API calls during analysis.
+    Kept for backward compatibility only.
     
     Returns:
         list: List of facility names, or empty list if request failed
@@ -714,6 +936,7 @@ def create_isochrones(token: str, coordinates, intervals, profile: str):
             return data["features"]
 
         logging.warning("Mapbox API response missing 'features'")
+        logging.warning(f"Response status: {response.status_code}, body: {response.text[:500]}")
         return []
     except requests.exceptions.Timeout:
         logging.warning("Mapbox API timeout")
