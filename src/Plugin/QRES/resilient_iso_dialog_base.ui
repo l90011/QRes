@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>411</width>
-       <height>260</height>
+    <height>159</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -17,7 +17,7 @@
    <property name="geometry">
     <rect>
      <x>0</x>
-     <y>210</y>
+     <y>120</y>
      <width>401</width>
      <height>41</height>
     </rect>
@@ -42,96 +42,6 @@
     <bool>false</bool>
    </property>
   </widget>
-    <widget class="QCheckBox" name="analyzeNullCheckBox">
-     <property name="geometry">
-        <rect>
-         <x>20</x>
-         <y>95</y>
-         <width>371</width>
-         <height>20</height>
-        </rect>
-     </property>
-     <property name="text">
-        <string>Analyze only NULL points</string>
-     </property>
-    </widget>
-   <widget class="QLabel" name="normalTimeoutLabel">
-    <property name="geometry">
-      <rect>
-       <x>20</x>
-       <y>125</y>
-       <width>180</width>
-       <height>20</height>
-      </rect>
-    </property>
-    <property name="text">
-      <string>Normal timeout (s)</string>
-    </property>
-   </widget>
-   <widget class="QSpinBox" name="normalTimeoutSpinBox">
-    <property name="geometry">
-      <rect>
-       <x>220</x>
-       <y>123</y>
-       <width>60</width>
-       <height>22</height>
-      </rect>
-    </property>
-    <property name="minimum">
-      <number>30</number>
-    </property>
-    <property name="maximum">
-      <number>900</number>
-    </property>
-    <property name="value">
-      <number>240</number>
-    </property>
-   </widget>
-   <widget class="QLabel" name="nullOnlyTimeoutLabel">
-    <property name="geometry">
-      <rect>
-       <x>20</x>
-       <y>155</y>
-       <width>180</width>
-       <height>20</height>
-      </rect>
-    </property>
-    <property name="text">
-      <string>NULL-only timeout (s)</string>
-    </property>
-   </widget>
-   <widget class="QSpinBox" name="nullOnlyTimeoutSpinBox">
-    <property name="geometry">
-      <rect>
-       <x>220</x>
-       <y>153</y>
-       <width>60</width>
-       <height>22</height>
-      </rect>
-    </property>
-    <property name="minimum">
-      <number>30</number>
-    </property>
-    <property name="maximum">
-      <number>900</number>
-    </property>
-    <property name="value">
-      <number>420</number>
-    </property>
-   </widget>
-   <widget class="QCheckBox" name="logFileCheckBox">
-    <property name="geometry">
-      <rect>
-       <x>20</x>
-       <y>185</y>
-       <width>371</width>
-       <height>20</height>
-      </rect>
-    </property>
-    <property name="text">
-      <string>Write log file</string>
-    </property>
-   </widget>
   <widget class="QTextBrowser" name="textBrowser">
    <property name="geometry">
     <rect>
