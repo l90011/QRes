@@ -24,8 +24,6 @@
 
 import os
 import json
-import time
-from datetime import datetime
 
 from PyQt5.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
 from PyQt5.QtGui import QIcon
@@ -45,12 +43,9 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsCoordinateReferenceSystem,
     QgsField,
-    QgsMessageLog,
     QgsProject,
     QgsVectorLayer,
     QgsWkbTypes,
-    Qgis,
-    NULL,
 )
 
 # Plugin dialogs
@@ -289,11 +284,6 @@ class ResilientIsochrones:
             QMessageBox.critical(self.iface.mainWindow(), "Invalid layer", "Selected layer must be a point vector layer.")
             return
 
-        analyze_only_null = bool(getattr(self.dlg, "analyzeNullCheckBox", None) and self.dlg.analyzeNullCheckBox.isChecked())
-        log_to_file = bool(getattr(self.dlg, "logFileCheckBox", None) and self.dlg.logFileCheckBox.isChecked())
-        normal_timeout = int(getattr(self.dlg, "normalTimeoutSpinBox", None).value()) if getattr(self.dlg, "normalTimeoutSpinBox", None) else 240
-        null_only_timeout = int(getattr(self.dlg, "nullOnlyTimeoutSpinBox", None).value()) if getattr(self.dlg, "nullOnlyTimeoutSpinBox", None) else 420
-
         total_operations = int(self.point_layer.featureCount())
         progress = QProgressDialog("Processing...", "Cancel", 0, total_operations, self.iface.mainWindow())
         progress.setWindowModality(Qt.WindowModal)
@@ -306,15 +296,6 @@ class ResilientIsochrones:
         # Ensure fields exist
         self._ensure_fields()
 
-        target_field_indices = self._get_target_field_indices()
-        if analyze_only_null:
-            total_operations = self._count_features_to_process(target_field_indices)
-            progress.setMaximum(total_operations)
-            if total_operations == 0:
-                progress.reset()
-                QMessageBox.information(self.iface.mainWindow(), "No points to process", "No NULL points were found.")
-                return
-
         layer_crs = self.point_layer.crs()
         transform = None
         if layer_crs.authid() != "EPSG:4326":
@@ -325,95 +306,43 @@ class ResilientIsochrones:
             )
 
         processed = 0
-        ok_count = 0
-        skipped_count = 0
-        no_data_count = 0
 
-        overpass_timeout = normal_timeout
-        if analyze_only_null:
-            overpass_timeout = null_only_timeout
+        for feature in self.point_layer.getFeatures():
+            if progress.wasCanceled():
+                break
+            if feature.geometry() is None or feature.geometry().isNull():
+                continue
 
-        overpass_cache = {}
-        log_file = None
-        if log_to_file:
-            log_dir = os.path.join(self.plugin_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-            log_name = datetime.now().strftime("qres_run_%Y%m%d_%H%M%S.log")
-            log_file = open(os.path.join(log_dir, log_name), "a", encoding="utf-8")
+            pt = feature.geometry().asPoint()
+            if transform is not None:
+                pt = transform.transform(pt)
 
-        def log_message(message: str):
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            line = f"[{timestamp}] {message}"
-            self._log_message(line)
-            if log_file is not None:
-                log_file.write(line + "\n")
-                log_file.flush()
+            resilience_dict = calculate_resilience(pt, FACILITIES, PROFILES, token)
 
-        try:
-            for feature in self.point_layer.getFeatures():
-                if progress.wasCanceled():
-                    break
-                if feature.geometry() is None or feature.geometry().isNull():
-                    continue
-                if analyze_only_null and not self._should_process_feature(feature, target_field_indices):
-                    continue
+            feature_id = feature.id()
 
-                pt = feature.geometry().asPoint()
-                if transform is not None:
-                    pt = transform.transform(pt)
+            # Update resilience fields
+            changes = {}
+            for key, value in resilience_dict.items():
+                idx = self.point_layer.fields().indexOf(key)
+                if idx >= 0:
+                    changes[idx] = value
 
-                log_message(f"Processing point {processed + 1} / {total_operations}")
-                resilience_dict, had_error, had_no_data = calculate_resilience(
-                    pt,
-                    FACILITIES,
-                    PROFILES,
-                    token,
-                    overpass_timeout,
-                    log_message,
-                    overpass_cache,
-                    0.2,
-                    2,
-                    [1, 2],
-                )
-                if had_error:
-                    skipped_count += 1
-                    log_message("Overpass or Mapbox error, skipped")
-                else:
-                    ok_count += 1
-                    if had_no_data:
-                        no_data_count += 1
+            # Update coords
+            x_idx = self.point_layer.fields().indexOf("X_coord")
+            y_idx = self.point_layer.fields().indexOf("Y_coord")
+            if x_idx >= 0:
+                changes[x_idx] = pt.x()
+            if y_idx >= 0:
+                changes[y_idx] = pt.y()
 
-                feature_id = feature.id()
+            if changes:
+                self.point_layer.dataProvider().changeAttributeValues({feature_id: changes})
 
-                # Update resilience fields
-                changes = {}
-                for key, value in resilience_dict.items():
-                    idx = self.point_layer.fields().indexOf(key)
-                    if idx >= 0:
-                        changes[idx] = value
-
-                # Update coords
-                x_idx = self.point_layer.fields().indexOf("X_coord")
-                y_idx = self.point_layer.fields().indexOf("Y_coord")
-                if x_idx >= 0:
-                    changes[x_idx] = pt.x()
-                if y_idx >= 0:
-                    changes[y_idx] = pt.y()
-
-                if changes:
-                    self.point_layer.dataProvider().changeAttributeValues({feature_id: changes})
-
-                processed += 1
-                progress.setValue(processed)
-                QCoreApplication.processEvents()
-                progress.setLabelText(f"Processing point {processed} / {total_operations}")
-
-                if processed % 25 == 0:
-                    self.point_layer.commitChanges()
-                    self.point_layer.startEditing()
-        finally:
-            if log_file is not None:
-                log_file.close()
+            processed += 1
+            progress.setValue(processed)
+            QCoreApplication.processEvents()
+            progress.setLabelText(f"Calculating resilience for point {feature_id}")
 
         # Commit changes
         self.point_layer.commitChanges()
@@ -425,7 +354,6 @@ class ResilientIsochrones:
             QMessageBox.information(self.iface.mainWindow(), "Canceled", "Processing was canceled.")
             return
 
-        self._log_message(f"Completed: ok = {ok_count}, skipped = {skipped_count}, no_data = {no_data_count}")
         QMessageBox.information(self.iface.mainWindow(), "Operation Complete", "The operation is complete.")
 
     # ----------------------------
@@ -492,87 +420,29 @@ class ResilientIsochrones:
             self.point_layer.dataProvider().addAttributes(to_add)
             self.point_layer.updateFields()
 
-    def _get_target_field_indices(self):
-        fields = self.point_layer.fields()
-        field_names = [f"R_{key}" for key in FACILITIES.keys()] + ["R_total"]
-        return [fields.indexOf(name) for name in field_names if fields.indexOf(name) >= 0]
-
-    def _should_process_feature(self, feature, target_field_indices):
-        for idx in target_field_indices:
-            value = feature.attribute(idx)
-            if value is None or value == NULL:
-                return True
-        return False
-
-    def _count_features_to_process(self, target_field_indices):
-        count = 0
-        for feature in self.point_layer.getFeatures():
-            if self._should_process_feature(feature, target_field_indices):
-                count += 1
-        return count
-
-    def _log_message(self, message: str):
-        QgsMessageLog.logMessage(message, "QRES", Qgis.Info)
-
 
 # ----------------------------
 # Core logic
 # ----------------------------
-def calculate_resilience(
-    point,
-    facilities,
-    profiles,
-    token: str,
-    overpass_timeout: int,
-    log_fn=None,
-    overpass_cache=None,
-    rate_limit_s: float = 0.0,
-    max_retries: int = 0,
-    backoff_steps=None,
-):
+def calculate_resilience(point, facilities, profiles, token: str) -> dict:
     latitude = point.y()
     longitude = point.x()
     coordinates = [longitude, latitude]
 
     resilience_dict = {}
 
-    def log_message(text: str):
-        if log_fn is not None:
-            log_fn(text)
-
-    if overpass_cache is None:
-        overpass_cache = {}
-    if backoff_steps is None:
-        backoff_steps = []
-
-    facility_no_data = []
-
     for facility_key in facilities.keys():
         profile = profiles[facility_key]["profile"]
         intervals = profiles[facility_key]["intervals"]
 
-        isochrones_features = create_isochrones(token, coordinates, intervals, profile, log_message)
-        if isochrones_features is None:
-            return _build_null_resilience_dict(facilities), True, False
+        isochrones_features = create_isochrones(token, coordinates, intervals, profile)
         isochrone_wkts = [shapely.geometry.shape(f["geometry"]).wkt for f in isochrones_features]
 
         all_facilities = []
         for wkt_poly in isochrone_wkts:
             polygon = wkt_polygon_to_overpass_format(wkt_poly)
             for query in facilities[facility_key]:
-                result = get_osm_data_within_polygon(
-                    polygon,
-                    query,
-                    overpass_timeout,
-                    log_message,
-                    overpass_cache,
-                    rate_limit_s,
-                    max_retries,
-                    backoff_steps,
-                )
-                if result is None:
-                    return _build_null_resilience_dict(facilities), True, False
-                all_facilities = [set(result)] + all_facilities
+                all_facilities = [set(get_osm_data_within_polygon(polygon, query))] + all_facilities
 
         # remove overlaps between time bands
         for i in range(len(isochrone_wkts)):
@@ -586,20 +456,12 @@ def calculate_resilience(
 
         r_value = counts[0] * 1.0 + counts[1] * 0.75 + counts[2] * 0.5
         resilience_dict[f"R_{facility_key}"] = r_value
-        facility_no_data.append(sum(counts) == 0)
 
     if resilience_dict:
         resilience_dict["R_total"] = sum(resilience_dict.values()) / float(len(resilience_dict))
     else:
         resilience_dict["R_total"] = 0.0
 
-    had_no_data = bool(facility_no_data) and all(facility_no_data)
-    return resilience_dict, False, had_no_data
-
-
-def _build_null_resilience_dict(facilities):
-    resilience_dict = {f"R_{key}": None for key in facilities.keys()}
-    resilience_dict["R_total"] = None
     return resilience_dict
 
 
@@ -610,16 +472,7 @@ def wkt_polygon_to_overpass_format(wkt_polygon: str) -> str:
     return " ".join([" ".join(p) for p in overpass_pairs])
 
 
-def get_osm_data_within_polygon(
-    polygon_wkt: str,
-    query: str,
-    timeout: int,
-    log_fn=None,
-    cache=None,
-    rate_limit_s: float = 0.0,
-    max_retries: int = 0,
-    backoff_steps=None,
-):
+def get_osm_data_within_polygon(polygon_wkt: str, query: str):
     url = "http://overpass-api.de/api/interpreter"
     data_query = f"""
 [out:json];
@@ -633,65 +486,23 @@ out body;
 out skel qt;
 """.strip()
 
-    if cache is None:
-        cache = {}
-    if backoff_steps is None:
-        backoff_steps = []
+    response = requests.get(url, params={"data": data_query}, timeout=240)
+    if response.status_code != 200:
+        return []
 
-    cache_key = (polygon_wkt, query)
-    if cache_key in cache:
-        return cache[cache_key]
-
-    attempts = max_retries + 1
-    last_error = None
-    for attempt in range(attempts):
-        if rate_limit_s > 0:
-            time.sleep(rate_limit_s)
-        try:
-            response = requests.get(url, params={"data": data_query}, timeout=timeout)
-        except Exception as exc:
-            last_error = exc
-            if log_fn is not None:
-                log_fn(f"Overpass request error (attempt {attempt + 1}/{attempts}): {exc}")
-            if attempt < max_retries:
-                time.sleep(backoff_steps[min(attempt, len(backoff_steps) - 1)] if backoff_steps else 0)
-                continue
-            return None
-
-        if response.status_code != 200:
-            if log_fn is not None:
-                log_fn(
-                    f"Overpass request failed with status {response.status_code} (attempt {attempt + 1}/{attempts})"
-                )
-            if attempt < max_retries:
-                time.sleep(backoff_steps[min(attempt, len(backoff_steps) - 1)] if backoff_steps else 0)
-                continue
-            return None
-
-        try:
-            data = response.json()
-            names = [
-                elem["tags"]["name"]
-                for elem in data.get("elements", [])
-                if "tags" in elem and "name" in elem["tags"]
-            ]
-            cache[cache_key] = names
-            return names
-        except Exception as exc:
-            last_error = exc
-            if log_fn is not None:
-                log_fn(f"Overpass response parse error (attempt {attempt + 1}/{attempts}): {exc}")
-            if attempt < max_retries:
-                time.sleep(backoff_steps[min(attempt, len(backoff_steps) - 1)] if backoff_steps else 0)
-                continue
-            return None
-
-    if log_fn is not None and last_error is not None:
-        log_fn(f"Overpass request failed after retries: {last_error}")
-    return None
+    try:
+        data = response.json()
+        names = [
+            elem["tags"]["name"]
+            for elem in data.get("elements", [])
+            if "tags" in elem and "name" in elem["tags"]
+        ]
+        return names
+    except Exception:
+        return []
 
 
-def create_isochrones(token: str, coordinates, intervals, profile: str, log_fn=None):
+def create_isochrones(token: str, coordinates, intervals, profile: str):
     try:
         url = f"https://api.mapbox.com/isochrone/v1/mapbox/{profile}/{coordinates[0]},{coordinates[1]}"
         url += "?contours_minutes=" + ",".join(map(str, intervals))
@@ -699,17 +510,11 @@ def create_isochrones(token: str, coordinates, intervals, profile: str, log_fn=N
         url += f"&access_token={token}"
 
         response = requests.get(url, timeout=120)
-        if response.status_code != 200:
-            if log_fn is not None:
-                log_fn(f"Mapbox request failed with status {response.status_code}")
-            return None
         data = json.loads(response.text)
 
         if "features" in data:
             return data["features"]
 
         return []
-    except Exception as exc:
-        if log_fn is not None:
-            log_fn(f"Mapbox request error: {exc}")
-        return None
+    except Exception:
+        return []
