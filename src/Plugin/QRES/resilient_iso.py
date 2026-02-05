@@ -24,6 +24,9 @@
 
 import os
 import json
+import logging
+import time
+from datetime import datetime
 
 from PyQt5.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
 from PyQt5.QtGui import QIcon
@@ -67,12 +70,6 @@ except Exception:
     _missing_deps.append("requests")
 
 try:
-    import simplejson
-except Exception:
-    simplejson = None
-    _missing_deps.append("simplejson")
-
-try:
     import shapely.geometry
 except Exception:
     shapely = None
@@ -82,29 +79,37 @@ except Exception:
 # ----------------------------
 # Config: facilities and profiles
 # ----------------------------
+
+# Polygon simplification tolerance in degrees
+# ~0.002 ≈ 220 meters at equator
+# Increase this value if you still get HTTP 504 timeouts
+# Higher values = faster queries but slightly less precise boundaries
+POLYGON_SIMPLIFICATION_TOLERANCE = 0.002
+
+# Overpass API timeout settings (in seconds)
+# Normal mode: 60s (1 minute) - increase if queries are timing out
+# NULL-only mode: 180s (3 minutes) - set in run() method
+OVERPASS_TIMEOUT_NORMAL = 60
+
+# Rate limiting: delay between Overpass API requests (seconds)
+# Helps avoid HTTP 429 (Too Many Requests) errors
+OVERPASS_REQUEST_DELAY = 2.0
+
+# Retry settings for rate limiting
+OVERPASS_MAX_RETRIES = 3
+OVERPASS_RETRY_DELAY = 10  # Initial delay in seconds, doubles on each retry
+
 FACILITIES = {
     "schools": ['"amenity"="school"'],
     "kindergarden": ['"amenity"="kindergarten"', '"amenity"="childcare"'],
     "transportation": ['"highway"="bus_stop"', '"railway"="station"'],
     "airports": ['"aeroway"="terminal"'],
-    "leisure_and_parks": ['"leisure"~"."',
-    '"landuse"="park"',
-    '"boundary"="protected_area"',
-    '"natural"="wood"',
-    '"landuse"="forest"',
-    '"natural"="grassland"',
-    '"landuse"="farmyard"',
-    '"landuse"="farmland"',
-    '"landuse"="farm"',
-    '"landuse"="meadow"',
-    '"landuse"="orchard"',
-    '"landuse"="vineyard"',
-    '"landuse"="allotments"',
-    '"landuse"="grass"',
-    '"landuse"="village_green"',
-    '"landuse"="recreation_ground"',
-    '"landuse"="greenfield"'
-],
+    "leisure_and_parks": [
+        '"leisure"~"."',
+        '"landuse"~"park|forest|meadow|grass|recreation_ground|village_green"',
+        '"natural"~"wood|grassland"',
+        '"boundary"="protected_area"'
+    ],
     "shops": ['"shop"~"."'],
     "higher_education": ['"amenity"="university"'],
     "further_education": ['"amenity"="college"'],
@@ -274,6 +279,19 @@ class ResilientIsochrones:
             QMessageBox.information(self.iface.mainWindow(), "No layer selected", "Please select a point layer.")
             return
 
+        # Get selected facilities from checkboxes
+        selected_facility_keys = self.dlg.get_selected_facilities()
+        if not selected_facility_keys:
+            QMessageBox.warning(self.iface.mainWindow(), "No facilities selected", 
+                "Please select at least one facility to calculate.")
+            return
+        
+        # Filter facilities and profiles based on user selection
+        selected_facilities = {k: FACILITIES[k] for k in selected_facility_keys}
+        selected_profiles = {k: PROFILES[k] for k in selected_facility_keys}
+        
+        logging.info(f"Selected facilities: {', '.join(selected_facility_keys)}")
+
         layers = QgsProject.instance().mapLayersByName(selected_layer_name)
         if not layers:
             QMessageBox.critical(self.iface.mainWindow(), "Layer not found", "Selected layer was not found.")
@@ -284,17 +302,55 @@ class ResilientIsochrones:
             QMessageBox.critical(self.iface.mainWindow(), "Invalid layer", "Selected layer must be a point vector layer.")
             return
 
-        total_operations = int(self.point_layer.featureCount())
-        progress = QProgressDialog("Processing...", "Cancel", 0, total_operations, self.iface.mainWindow())
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setWindowTitle("Processing...")
-        progress.show()
+        # Check if we should process only NULL points
+        process_only_null = self.dlg.processNullCheckBox.isChecked()
+        null_only_timeout = 180 if process_only_null else None
+
+        # Setup logging
+        log_file = self._setup_logging()
+        logging.info("="*60)
+        logging.info(f"Starting resilience calculation at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logging.info(f"Layer: {selected_layer_name}")
+        logging.info(f"Process only NULL points: {process_only_null}")
+        if process_only_null:
+            logging.info(f"Using extended timeout: {null_only_timeout}s")
 
         # Start editing
         self.point_layer.startEditing()
 
         # Ensure fields exist
         self._ensure_fields()
+
+        # Filter features based on mode
+        features_to_process = []
+        if process_only_null:
+            r_total_idx = self.point_layer.fields().indexOf("R_total")
+            for feature in self.point_layer.getFeatures():
+                if feature.geometry() is None or feature.geometry().isNull():
+                    continue
+                if r_total_idx >= 0:
+                    r_total_value = feature.attribute(r_total_idx)
+                    if r_total_value is None or (isinstance(r_total_value, str) and r_total_value.upper() == "NULL"):
+                        features_to_process.append(feature)
+                else:
+                    features_to_process.append(feature)
+        else:
+            features_to_process = [f for f in self.point_layer.getFeatures() if f.geometry() is not None and not f.geometry().isNull()]
+
+        total_operations = len(features_to_process)
+        if total_operations == 0:
+            msg = "No NULL points found to process." if process_only_null else "No valid points found to process."
+            QMessageBox.information(self.iface.mainWindow(), "No points to process", msg)
+            self.point_layer.rollBack()
+            logging.info(msg)
+            return
+
+        logging.info(f"Total points to process: {total_operations}")
+
+        progress = QProgressDialog("Processing...", "Cancel", 0, total_operations, self.iface.mainWindow())
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowTitle("Processing...")
+        progress.show()
 
         layer_crs = self.point_layer.crs()
         transform = None
@@ -306,29 +362,39 @@ class ResilientIsochrones:
             )
 
         processed = 0
+        succeeded = 0
+        skipped = 0
 
-        for feature in self.point_layer.getFeatures():
+        for feature in features_to_process:
             if progress.wasCanceled():
+                logging.info("Processing canceled by user")
                 break
-            if feature.geometry() is None or feature.geometry().isNull():
-                continue
 
+            feature_id = feature.id()
             pt = feature.geometry().asPoint()
             if transform is not None:
                 pt = transform.transform(pt)
 
-            resilience_dict = calculate_resilience(pt, FACILITIES, PROFILES, token)
+            progress.setLabelText(f"Processing point {processed + 1}/{total_operations} (ID: {feature_id})")
+            logging.info(f"Processing point {processed + 1}/{total_operations} (ID: {feature_id}, coords: {pt.x():.4f}, {pt.y():.4f})")
 
-            feature_id = feature.id()
+            resilience_dict = calculate_resilience(pt, selected_facilities, selected_profiles, token, null_only_timeout)
 
-            # Update resilience fields
+            # Update fields
             changes = {}
+            
+            # Update resilience fields
             for key, value in resilience_dict.items():
                 idx = self.point_layer.fields().indexOf(key)
                 if idx >= 0:
                     changes[idx] = value
+                    
+            if resilience_dict.get("R_total", 0) > 0:
+                succeeded += 1
+            else:
+                skipped += 1
 
-            # Update coords
+            # Always update coords
             x_idx = self.point_layer.fields().indexOf("X_coord")
             y_idx = self.point_layer.fields().indexOf("Y_coord")
             if x_idx >= 0:
@@ -342,7 +408,6 @@ class ResilientIsochrones:
             processed += 1
             progress.setValue(processed)
             QCoreApplication.processEvents()
-            progress.setLabelText(f"Calculating resilience for point {feature_id}")
 
         # Commit changes
         self.point_layer.commitChanges()
@@ -350,11 +415,24 @@ class ResilientIsochrones:
 
         progress.reset()
 
+        # Summary
+        summary_msg = f"\n{'='*60}\n"
+        summary_msg += f"Processing complete at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        summary_msg += f"Total processed: {processed}\n"
+        summary_msg += f"Succeeded: {succeeded}\n"
+        summary_msg += f"Skipped (failed): {skipped}\n"
+        summary_msg += f"Log file: {log_file}\n"
+        summary_msg += f"{'='*60}"
+        
+        logging.info(summary_msg)
+
         if progress.wasCanceled():
-            QMessageBox.information(self.iface.mainWindow(), "Canceled", "Processing was canceled.")
+            QMessageBox.information(self.iface.mainWindow(), "Canceled", 
+                f"Processing was canceled.\n\nCompleted: {succeeded}, Failed: {skipped}\n\nSee log: {log_file}")
             return
 
-        QMessageBox.information(self.iface.mainWindow(), "Operation Complete", "The operation is complete.")
+        QMessageBox.information(self.iface.mainWindow(), "Operation Complete", 
+            f"Processing complete!\n\nSucceeded: {succeeded}\nFailed: {skipped}\n\nSee log: {log_file}")
 
     # ----------------------------
     # Helpers
@@ -400,6 +478,7 @@ class ResilientIsochrones:
         self.dlg.layersComboBox.addItems(layer_names)
 
     def _ensure_fields(self):
+        """Ensure all possible facility fields exist (not just selected ones)."""
         existing = {f.name() for f in self.point_layer.fields()}
 
         to_add = []
@@ -408,6 +487,7 @@ class ResilientIsochrones:
         if "Y_coord" not in existing:
             to_add.append(QgsField("Y_coord", QVariant.Double))
 
+        # Add fields for ALL facilities (not just selected) so layer structure is consistent
         for facility_key in FACILITIES.keys():
             field_name = f"R_{facility_key}"
             if field_name not in existing:
@@ -420,49 +500,149 @@ class ResilientIsochrones:
             self.point_layer.dataProvider().addAttributes(to_add)
             self.point_layer.updateFields()
 
+    def _setup_logging(self) -> str:
+        """Setup logging to file and return log file path."""
+        # Use %LOCALAPPDATA%\QRES for logs (works for any user)
+        localappdata = os.getenv('LOCALAPPDATA')
+        if localappdata:
+            log_dir = os.path.join(localappdata, "QRES")
+        else:
+            # Fallback to plugin directory if LOCALAPPDATA not available
+            log_dir = os.path.join(self.plugin_dir, "logs")
+        
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"resilience_calc_{timestamp}.log")
+        
+        # Clear any existing handlers
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+        
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        
+        return log_file
+
 
 # ----------------------------
 # Core logic
 # ----------------------------
-def calculate_resilience(point, facilities, profiles, token: str) -> dict:
+def calculate_resilience(point, facilities, profiles, token: str, null_only_timeout: int = None) -> dict:
+    """Calculate resilience values for a point.
+    
+    Args:
+        point: QgsPoint with coordinates
+        facilities: Dict of facility definitions
+        profiles: Dict of profile configurations
+        token: Mapbox API token
+        null_only_timeout: Optional longer timeout for NULL-only mode
+    
+    Returns:
+        dict: Resilience values, or None if calculation failed
+    """
     latitude = point.y()
     longitude = point.x()
     coordinates = [longitude, latitude]
 
     resilience_dict = {}
+    overpass_timeout = null_only_timeout if null_only_timeout else 60
+    point_start_time = time.time()
 
-    for facility_key in facilities.keys():
-        profile = profiles[facility_key]["profile"]
-        intervals = profiles[facility_key]["intervals"]
+    try:
+        for facility_key in facilities.keys():
+            facility_start_time = time.time()
+            profile = profiles[facility_key]["profile"]
+            intervals = profiles[facility_key]["intervals"]
+            
+            logging.info(f"  → Calculating {facility_key} ({profile}, {intervals} min)")
 
-        isochrones_features = create_isochrones(token, coordinates, intervals, profile)
-        isochrone_wkts = [shapely.geometry.shape(f["geometry"]).wkt for f in isochrones_features]
+            mapbox_start = time.time()
+            isochrones_features = create_isochrones(token, coordinates, intervals, profile)
+            mapbox_elapsed = time.time() - mapbox_start
+            logging.info(f"    Mapbox API: {mapbox_elapsed:.1f}s")
+            
+            if not isochrones_features:
+                logging.warning(f"No isochrone features returned for {facility_key}, skipping")
+                resilience_dict[f"R_{facility_key}"] = 0.0
+                continue
 
-        all_facilities = []
-        for wkt_poly in isochrone_wkts:
-            polygon = wkt_polygon_to_overpass_format(wkt_poly)
-            for query in facilities[facility_key]:
-                all_facilities = [set(get_osm_data_within_polygon(polygon, query))] + all_facilities
+            # Simplify polygons to avoid HTTP 414 errors (URI too long)
+            # Tolerance configured in POLYGON_SIMPLIFICATION_TOLERANCE
+            isochrone_wkts = []
+            total_coords_before = 0
+            total_coords_after = 0
+            for idx, f in enumerate(isochrones_features):
+                geom = shapely.geometry.shape(f["geometry"])
+                original_coords = len(geom.exterior.coords)
+                total_coords_before += original_coords
+                # Simplify to reduce coordinate count
+                simplified = geom.simplify(tolerance=POLYGON_SIMPLIFICATION_TOLERANCE, preserve_topology=True)
+                simplified_coords = len(simplified.exterior.coords)
+                total_coords_after += simplified_coords
+                logging.debug(f"{facility_key} isochrone {idx+1}: {original_coords} -> {simplified_coords} coords")
+                isochrone_wkts.append(simplified.wkt)
+            
+            logging.info(f"    Simplified {len(isochrones_features)} polygons: {total_coords_before} -> {total_coords_after} coords ({100*(1-total_coords_after/total_coords_before):.1f}% reduction)")
 
-        # remove overlaps between time bands
-        for i in range(len(isochrone_wkts)):
-            for j in range(i + 1, len(isochrone_wkts)):
-                all_facilities[j] = all_facilities[j] - all_facilities[i]
+            all_facilities = []
+            overpass_total_time = 0
+            overpass_call_count = 0
+            for band_idx, wkt_poly in enumerate(isochrone_wkts):
+                polygon = wkt_polygon_to_overpass_format(wkt_poly)
+                poly_length = len(polygon)
+                logging.debug(f"{facility_key} band {band_idx+1}: polygon string length = {poly_length}")
+                for query in facilities[facility_key]:
+                    overpass_start = time.time()
+                    osm_data = get_osm_data_within_polygon(polygon, query, timeout=overpass_timeout)
+                    overpass_elapsed = time.time() - overpass_start
+                    overpass_total_time += overpass_elapsed
+                    overpass_call_count += 1
+                    logging.info(f"    Overpass query {overpass_call_count}: {overpass_elapsed:.1f}s, {len(osm_data)} results")
+                    all_facilities = [set(osm_data)] + all_facilities
 
-        counts = [len(x) for x in all_facilities]
-        # expected 3 bands
-        while len(counts) < 3:
-            counts.append(0)
+            # remove overlaps between time bands
+            for i in range(len(isochrone_wkts)):
+                for j in range(i + 1, len(isochrone_wkts)):
+                    all_facilities[j] = all_facilities[j] - all_facilities[i]
 
-        r_value = counts[0] * 1.0 + counts[1] * 0.75 + counts[2] * 0.5
-        resilience_dict[f"R_{facility_key}"] = r_value
+            counts = [len(x) for x in all_facilities]
+            # expected 3 bands
+            while len(counts) < 3:
+                counts.append(0)
 
-    if resilience_dict:
-        resilience_dict["R_total"] = sum(resilience_dict.values()) / float(len(resilience_dict))
-    else:
-        resilience_dict["R_total"] = 0.0
+            r_value = counts[0] * 1.0 + counts[1] * 0.75 + counts[2] * 0.5
+            resilience_dict[f"R_{facility_key}"] = r_value
+            
+            facility_elapsed = time.time() - facility_start_time
+            logging.info(f"    {facility_key} complete: {facility_elapsed:.1f}s total ({overpass_call_count} Overpass calls, {overpass_total_time:.1f}s)")
+            
+            # Small delay between facilities to reduce rate limiting
+            time.sleep(0.5)
 
-    return resilience_dict
+        if resilience_dict:
+            resilience_dict["R_total"] = sum(resilience_dict.values()) / float(len(resilience_dict))
+        else:
+            resilience_dict["R_total"] = 0.0
+
+        point_elapsed = time.time() - point_start_time
+        logging.info(f"  Point complete: {point_elapsed:.1f}s total")
+
+        return resilience_dict
+    
+    except Exception as e:
+        logging.error(f"Unexpected error in calculate_resilience: {e}")
+        # Return dict with zeros instead of None to avoid complete failure
+        result = {f"R_{k}": 0.0 for k in facilities.keys()}
+        result["R_total"] = 0.0
+        return result
 
 
 def wkt_polygon_to_overpass_format(wkt_polygon: str) -> str:
@@ -472,7 +652,12 @@ def wkt_polygon_to_overpass_format(wkt_polygon: str) -> str:
     return " ".join([" ".join(p) for p in overpass_pairs])
 
 
-def get_osm_data_within_polygon(polygon_wkt: str, query: str):
+def get_osm_data_within_polygon(polygon_wkt: str, query: str, timeout: int = 240):
+    """Query Overpass API for OSM data within a polygon.
+    
+    Returns:
+        list: List of facility names, or empty list if request failed
+    """
     url = "http://overpass-api.de/api/interpreter"
     data_query = f"""
 [out:json];
@@ -486,11 +671,12 @@ out body;
 out skel qt;
 """.strip()
 
-    response = requests.get(url, params={"data": data_query}, timeout=240)
-    if response.status_code != 200:
-        return []
-
     try:
+        response = requests.get(url, params={"data": data_query}, timeout=timeout)
+        if response.status_code != 200:
+            logging.warning(f"Overpass API returned status {response.status_code}")
+            return []
+
         data = response.json()
         names = [
             elem["tags"]["name"]
@@ -498,11 +684,23 @@ out skel qt;
             if "tags" in elem and "name" in elem["tags"]
         ]
         return names
-    except Exception:
+    except requests.exceptions.Timeout:
+        logging.warning(f"Overpass API timeout after {timeout}s")
+        return []
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Overpass API request failed: {e}")
+        return []
+    except Exception as e:
+        logging.warning(f"Overpass API unexpected error: {e}")
         return []
 
 
 def create_isochrones(token: str, coordinates, intervals, profile: str):
+    """Create isochrones using Mapbox API.
+    
+    Returns:
+        list: List of isochrone features, or empty list if request failed
+    """
     try:
         url = f"https://api.mapbox.com/isochrone/v1/mapbox/{profile}/{coordinates[0]},{coordinates[1]}"
         url += "?contours_minutes=" + ",".join(map(str, intervals))
@@ -515,6 +713,14 @@ def create_isochrones(token: str, coordinates, intervals, profile: str):
         if "features" in data:
             return data["features"]
 
+        logging.warning("Mapbox API response missing 'features'")
         return []
-    except Exception:
+    except requests.exceptions.Timeout:
+        logging.warning("Mapbox API timeout")
+        return []
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Mapbox API request failed: {e}")
+        return []
+    except Exception as e:
+        logging.warning(f"Mapbox API unexpected error: {e}")
         return []

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>411</width>
-    <height>159</height>
+    <height>190</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -17,7 +17,7 @@
    <property name="geometry">
     <rect>
      <x>0</x>
-     <y>120</y>
+     <y>150</y>
      <width>401</width>
      <height>41</height>
     </rect>
@@ -40,6 +40,22 @@
    </property>
    <property name="autoFillBackground">
     <bool>false</bool>
+   </property>
+  </widget>
+  <widget class="QCheckBox" name="processNullCheckBox">
+   <property name="geometry">
+    <rect>
+     <x>20</x>
+     <y>95</y>
+     <width>371</width>
+     <height>20</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>Process only points with NULL values (retry failures)</string>
+   </property>
+   <property name="toolTip">
+    <string>When checked, only points with NULL resilience values will be processed. Uses extended timeout (360s) for better success rate.</string>
    </property>
   </widget>
   <widget class="QTextBrowser" name="textBrowser">
