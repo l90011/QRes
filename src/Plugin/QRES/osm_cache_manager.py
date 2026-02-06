@@ -19,20 +19,23 @@ from qgis.core import (
 
 
 class OSMCacheManager:
-    """Manages local OSM data cache in system-level directory."""
+    """Manages local OSM data cache in per-user directory."""
     
     CACHE_VERSION = "1.0"
     
     @staticmethod
     def _get_base_dir():
-        """Get platform-specific base directory for cache storage."""
+        """Get platform-specific per-user base directory for cache storage."""
         system = platform.system()
         if system == "Windows":
-            return os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'QRes')
+            # Use per-user AppData\Local directory
+            return os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~/AppData/Local')), 'QRes')
         elif system == "Darwin":  # macOS
-            return "/Library/Application Support/QRes"
+            # Use per-user Library/Caches directory
+            return os.path.expanduser('~/Library/Caches/QRes')
         else:  # Linux and others
-            return "/var/lib/QRes"
+            # Use XDG cache directory standard
+            return os.path.expanduser('~/.cache/QRes')
     
     BASE_DIR = _get_base_dir.__func__()
     

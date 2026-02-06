@@ -687,15 +687,15 @@ class ResilientIsochrones:
 
     def _setup_logging(self) -> str:
         """Setup logging to file and return log file path."""
-        # Use platform-specific directory for system-wide logging
+        # Use platform-specific per-user directory for logging
         import platform
         system = platform.system()
         if system == "Windows":
-            log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'QRes', 'logs')
+            log_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~/AppData/Local')), 'QRes', 'logs')
         elif system == "Darwin":  # macOS
-            log_dir = "/Library/Application Support/QRes/logs"
+            log_dir = os.path.expanduser('~/Library/Logs/QRes')
         else:  # Linux and others
-            log_dir = "/var/lib/QRes/logs"
+            log_dir = os.path.expanduser('~/.cache/QRes/logs')
         
         try:
             if not os.path.exists(log_dir):
