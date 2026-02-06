@@ -7,6 +7,7 @@ Manages local OSM data cache including metadata, validation, and storage.
 import os
 import json
 import hashlib
+import platform
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -21,7 +22,19 @@ class OSMCacheManager:
     """Manages local OSM data cache in system-level directory."""
     
     CACHE_VERSION = "1.0"
-    BASE_DIR = r"C:\ProgramData\QRes"
+    
+    @staticmethod
+    def _get_base_dir():
+        """Get platform-specific base directory for cache storage."""
+        system = platform.system()
+        if system == "Windows":
+            return os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'QRes')
+        elif system == "Darwin":  # macOS
+            return "/Library/Application Support/QRes"
+        else:  # Linux and others
+            return "/var/lib/QRes"
+    
+    BASE_DIR = _get_base_dir.__func__()
     
     def __init__(self):
         """Initialize cache manager using system-level directory."""
