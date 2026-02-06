@@ -439,9 +439,6 @@ class ResilientIsochrones:
         # Initialize local query layer
         local_query = LocalOSMQuery(cache_manager.gpkg_file)
 
-        # Check if we should process only NULL points
-        process_only_null = self.dlg.processNullCheckBox.isChecked()
-        logging.info(f"Process only NULL points: {process_only_null}")
         logging.info("="*60)
         logging.info("Starting resilience calculation...")
 
@@ -451,21 +448,11 @@ class ResilientIsochrones:
         # Ensure fields exist
         self._ensure_fields()
 
-        # Filter features based on mode
-        features_to_process = []
-        if process_only_null:
-            r_total_idx = self.point_layer.fields().indexOf("R_total")
-            for feature in self.point_layer.getFeatures():
-                if feature.geometry() is None or feature.geometry().isNull():
-                    continue
-                if r_total_idx >= 0:
-                    r_total_value = feature.attribute(r_total_idx)
-                    if r_total_value is None or (isinstance(r_total_value, str) and r_total_value.upper() == "NULL"):
-                        features_to_process.append(feature)
-                else:
-                    features_to_process.append(feature)
-        else:
-            features_to_process = [f for f in self.point_layer.getFeatures() if f.geometry() is not None and not f.geometry().isNull()]
+        # Filter features (skip null geometries)
+        features_to_process = [
+            f for f in self.point_layer.getFeatures()
+            if f.geometry() is not None and not f.geometry().isNull()
+        ]
 
         total_operations = len(features_to_process)
         if total_operations == 0:

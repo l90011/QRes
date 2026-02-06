@@ -42,22 +42,6 @@
     <bool>false</bool>
    </property>
   </widget>
-  <widget class="QCheckBox" name="processNullCheckBox">
-   <property name="geometry">
-    <rect>
-     <x>20</x>
-     <y>95</y>
-     <width>371</width>
-     <height>20</height>
-    </rect>
-   </property>
-   <property name="text">
-    <string>Process only points with NULL values (retry failures)</string>
-   </property>
-   <property name="toolTip">
-    <string>When checked, only points with NULL resilience values will be processed. Uses extended timeout (360s) for better success rate.</string>
-   </property>
-  </widget>
   <widget class="QTextBrowser" name="textBrowser">
    <property name="geometry">
     <rect>
