@@ -27,6 +27,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt5.QtCore import QSettings, QTranslator, QCoreApplication, QVariant, Qt
 from PyQt5.QtGui import QIcon
@@ -90,6 +91,10 @@ except Exception:
 # ~0.002 ≈ 220 meters at equator
 # Used for isochrone polygons to reduce coordinate count
 POLYGON_SIMPLIFICATION_TOLERANCE = 0.002
+
+# Maximum concurrent Mapbox API calls
+# Limits parallel requests to avoid overwhelming the API or network
+MAX_CONCURRENT_MAPBOX_CALLS = 6
 
 FACILITIES = {
     "schools": ['"amenity"="school"'],
@@ -410,17 +415,11 @@ class ResilientIsochrones:
                     list(feature_counts.keys())  # Only categories with data
                 )
                 
-                summary = "OSM data downloaded successfully!\n\n"
-                for cat, count in feature_counts.items():
-                    summary += f"{cat}: {count} features\n"
-                
-                QMessageBox.information(
-                    self.iface.mainWindow(),
-                    "Download Complete",
-                    summary
-                )
-                
+                # Log download summary
+                summary = "OSM data downloaded successfully: "
+                summary += ", ".join([f"{cat}={count}" for cat, count in feature_counts.items()])
                 logging.info(f"OSM cache created: {feature_counts}")
+                logging.info(summary)
                 
             except Exception as e:
                 download_progress.reset()
@@ -691,7 +690,7 @@ class ResilientIsochrones:
         import platform
         system = platform.system()
         if system == "Windows":
-            log_dir = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~/AppData/Local')), 'QRes', 'logs')
+            log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'QRes', 'logs')
         elif system == "Darwin":  # macOS
             log_dir = os.path.expanduser('~/Library/Logs/QRes')
         else:  # Linux and others
@@ -729,6 +728,25 @@ class ResilientIsochrones:
 # ----------------------------
 # Core logic
 # ----------------------------
+def _fetch_isochrones_for_facility(facility_key: str, coordinates, profile: str, intervals, token: str) -> tuple:
+    """Fetch isochrones for a single facility (designed for parallel execution).
+    
+    Args:
+        facility_key: Facility identifier
+        coordinates: [longitude, latitude]
+        profile: Mapbox profile (walking/driving)
+        intervals: List of time intervals
+        token: Mapbox API token
+    
+    Returns:
+        tuple: (facility_key, isochrones_features, elapsed_time)
+    """
+    start_time = time.time()
+    isochrones_features = create_isochrones(token, coordinates, intervals, profile)
+    elapsed_time = time.time() - start_time
+    return (facility_key, isochrones_features, elapsed_time)
+
+
 def calculate_resilience(point, facilities, profiles, token: str, local_query: LocalOSMQuery, layer_crs: QgsCoordinateReferenceSystem) -> dict:
     """Calculate resilience values for a point using local OSM cache.
     
@@ -750,17 +768,46 @@ def calculate_resilience(point, facilities, profiles, token: str, local_query: L
     point_start_time = time.time()
 
     try:
+        # Step 1: Fetch all isochrones in parallel
+        logging.info(f"  → Fetching isochrones for {len(facilities)} facilities in parallel...")
+        parallel_start = time.time()
+        
+        futures_to_facility = {}
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_MAPBOX_CALLS) as executor:
+            for facility_key in facilities.keys():
+                profile = profiles[facility_key]["profile"]
+                intervals = profiles[facility_key]["intervals"]
+                
+                future = executor.submit(
+                    _fetch_isochrones_for_facility,
+                    facility_key, coordinates, profile, intervals, token
+                )
+                futures_to_facility[future] = facility_key
+        
+            # Collect results as they complete
+            facility_isochrones = {}
+            for future in as_completed(futures_to_facility):
+                facility_key = futures_to_facility[future]
+                try:
+                    fac_key, isochrones_features, mapbox_elapsed = future.result()
+                    facility_isochrones[fac_key] = isochrones_features
+                    logging.info(f"    ✓ {fac_key}: {mapbox_elapsed:.1f}s")
+                except Exception as e:
+                    logging.error(f"    ✗ {facility_key} failed: {e}")
+                    facility_isochrones[facility_key] = []
+        
+        parallel_elapsed = time.time() - parallel_start
+        logging.info(f"  Parallel fetch complete: {parallel_elapsed:.1f}s (avg {parallel_elapsed/len(facilities):.1f}s per facility)")
+        
+        # Step 2: Process each facility's isochrones sequentially
         for facility_key in facilities.keys():
             facility_start_time = time.time()
             profile = profiles[facility_key]["profile"]
             intervals = profiles[facility_key]["intervals"]
             
-            logging.info(f"  → Calculating {facility_key} ({profile}, {intervals} min)")
-
-            mapbox_start = time.time()
-            isochrones_features = create_isochrones(token, coordinates, intervals, profile)
-            mapbox_elapsed = time.time() - mapbox_start
-            logging.info(f"    Mapbox API: {mapbox_elapsed:.1f}s")
+            logging.info(f"  → Processing {facility_key} ({profile}, {intervals} min)")
+            
+            isochrones_features = facility_isochrones.get(facility_key, [])
             
             if not isochrones_features:
                 logging.warning(f"No isochrone features returned for {facility_key}, skipping")

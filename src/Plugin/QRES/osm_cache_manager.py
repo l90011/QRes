@@ -25,11 +25,11 @@ class OSMCacheManager:
     
     @staticmethod
     def _get_base_dir():
-        """Get platform-specific per-user base directory for cache storage."""
+        """Get platform-specific base directory for cache storage."""
         system = platform.system()
         if system == "Windows":
-            # Use per-user AppData\Local directory
-            return os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~/AppData/Local')), 'QRes')
+            # Use system-wide ProgramData directory
+            return os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'QRes')
         elif system == "Darwin":  # macOS
             # Use per-user Library/Caches directory
             return os.path.expanduser('~/Library/Caches/QRes')
