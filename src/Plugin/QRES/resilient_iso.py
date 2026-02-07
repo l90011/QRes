@@ -574,8 +574,7 @@ class ResilientIsochrones:
             QMessageBox.information(self.iface.mainWindow(), "Canceled", 
                 f"Processing was canceled.\n\n"
                 f"Time elapsed: {operation_elapsed/60:.1f} minutes ({operation_elapsed:.0f}s)\n"
-                f"Completed: {succeeded}, Failed: {skipped}\n\n"
-                f"See log: {log_file}")
+                f"Completed: {succeeded}, Failed: {skipped}\n\n")
             return
 
         # Build OSM features summary
@@ -603,8 +602,7 @@ class ResilientIsochrones:
             f"Processing complete!\n\n"
             f"Time elapsed: {operation_elapsed/60:.1f} minutes ({operation_elapsed:.0f}s)\n"
             f"Succeeded: {succeeded}\nFailed: {skipped}"
-            f"{osm_summary}\n"
-            f"See log: {log_file}")
+            f"{osm_summary}\n")
 
     # ----------------------------
     # Helpers
