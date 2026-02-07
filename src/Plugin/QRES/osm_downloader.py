@@ -129,9 +129,21 @@ class OSMDownloader:
                     return data
                     
                 elif response.status_code == 429:
-                    # Rate limit - wait longer before retry
-                    wait_time = 60 * (attempt + 1)  # 60s, 120s, 180s
-                    self.logger.warning(f"Overpass API rate limit (429). Waiting {wait_time}s before retry...")
+                    # Rate limit - check Retry-After header first
+                    retry_after = response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            wait_time = int(retry_after)
+                            self.logger.warning(f"Overpass API rate limit (429). Server says retry after {wait_time}s")
+                        except ValueError:
+                            # Retry-After might be a date, use exponential backoff
+                            wait_time = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                            self.logger.warning(f"Overpass API rate limit (429). Exponential backoff: {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    else:
+                        # Exponential backoff: 30s, 60s, 120s
+                        wait_time = 30 * (2 ** attempt)
+                        self.logger.warning(f"Overpass API rate limit (429). Exponential backoff: {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    
                     if attempt < max_retries - 1:
                         time.sleep(wait_time)
                         continue
@@ -359,7 +371,8 @@ class OSMDownloader:
         gpkg_path: str,
         target_crs: QgsCoordinateReferenceSystem,
         categories: Optional[List[str]] = None,
-        progress_callback=None
+        progress_callback=None,
+        delay_between_requests: float = 0
     ) -> Dict[str, int]:
         """
         Download OSM data for all categories and cache locally.
@@ -370,6 +383,7 @@ class OSMDownloader:
             target_crs: Target coordinate system for cached data
             categories: List of category keys to download (None = all)
             progress_callback: Optional callback(current, total, category_name)
+            delay_between_requests: Delay in seconds between category requests (to avoid rate limits)
             
         Returns:
             Dict mapping category name to feature count
@@ -381,6 +395,11 @@ class OSMDownloader:
         total = len(categories)
         
         for idx, category in enumerate(categories, 1):
+            # Add delay between requests to avoid rate limiting (skip for first request)
+            if idx > 1 and delay_between_requests > 0:
+                self.logger.info(f"Waiting {delay_between_requests}s before next category (rate limit prevention)...")
+                time.sleep(delay_between_requests)
+            
             if progress_callback:
                 progress_callback(idx, total, category)
             

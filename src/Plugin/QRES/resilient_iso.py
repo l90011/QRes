@@ -94,7 +94,11 @@ POLYGON_SIMPLIFICATION_TOLERANCE = 0.002
 
 # Maximum concurrent Mapbox API calls
 # Limits parallel requests to avoid overwhelming the API or network
-MAX_CONCURRENT_MAPBOX_CALLS = 6
+MAX_CONCURRENT_MAPBOX_CALLS = 9
+
+# Delay between Overpass API requests to avoid rate limiting (seconds)
+# Helps prevent HTTP 429 (Too Many Requests) errors
+OVERPASS_REQUEST_DELAY = 3
 
 FACILITIES = {
     "schools": ['"amenity"="school"'],
@@ -304,6 +308,7 @@ class ResilientIsochrones:
 
         # Setup logging early
         log_file = self._setup_logging()
+        operation_start_time = time.time()
         logging.info("="*60)
         logging.info(f"QRES Plugin started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logging.info(f"Layer: {selected_layer_name}")
@@ -387,7 +392,8 @@ class ResilientIsochrones:
                     cache_manager.gpkg_file,
                     self.point_layer.crs(),
                     list(selected_facility_keys),
-                    progress_callback
+                    progress_callback,
+                    delay_between_requests=OVERPASS_REQUEST_DELAY
                 )
                 
                 download_progress.reset()
@@ -542,8 +548,10 @@ class ResilientIsochrones:
         progress.reset()
 
         # Summary
+        operation_elapsed = time.time() - operation_start_time
         summary_msg = f"\n{'='*60}\n"
         summary_msg += f"Processing complete at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        summary_msg += f"Total operation time: {operation_elapsed:.1f} seconds ({operation_elapsed/60:.1f} minutes)\n"
         summary_msg += f"Total processed: {processed}\n"
         summary_msg += f"Succeeded: {succeeded}\n"
         summary_msg += f"Skipped (failed): {skipped}\n"
@@ -554,11 +562,17 @@ class ResilientIsochrones:
 
         if progress.wasCanceled():
             QMessageBox.information(self.iface.mainWindow(), "Canceled", 
-                f"Processing was canceled.\n\nCompleted: {succeeded}, Failed: {skipped}\n\nSee log: {log_file}")
+                f"Processing was canceled.\n\n"
+                f"Time elapsed: {operation_elapsed/60:.1f} minutes ({operation_elapsed:.0f}s)\n"
+                f"Completed: {succeeded}, Failed: {skipped}\n\n"
+                f"See log: {log_file}")
             return
 
         QMessageBox.information(self.iface.mainWindow(), "Operation Complete", 
-            f"Processing complete!\n\nSucceeded: {succeeded}\nFailed: {skipped}\n\nSee log: {log_file}")
+            f"Processing complete!\n\n"
+            f"Time elapsed: {operation_elapsed/60:.1f} minutes ({operation_elapsed:.0f}s)\n"
+            f"Succeeded: {succeeded}\nFailed: {skipped}\n\n"
+            f"See log: {log_file}")
 
     # ----------------------------
     # Helpers
