@@ -179,8 +179,9 @@ class ResilientIsochrones:
         # Dialog from Plugin Builder
         self.dlg = ResilientIsochronesDialog()
         
-        # Set refresh OSM callback
+        # Set callbacks
         self.dlg.set_refresh_osm_callback(self._refresh_osm_cache)
+        self.dlg.set_configure_token_callback(self._configure_mapbox_token)
 
         # i18n (kept compatible with older file naming)
         locale = QSettings().value("locale/userLocale", "")[:2]
@@ -635,6 +636,37 @@ class ResilientIsochrones:
 
         settings.setValue(self.SETTINGS_KEY, token)
         return token
+    
+    def _configure_mapbox_token(self):
+        """Allow user to reconfigure/update the Mapbox token."""
+        settings = QSettings()
+        current_token = settings.value(self.SETTINGS_KEY, "", type=str).strip()
+        
+        dialog = MapboxTokenDialog(self.iface.mainWindow())
+        
+        # Pre-fill with current token if it exists
+        if current_token:
+            dialog.lineEdit.setText(current_token)
+        
+        result = dialog.exec_()
+        if result != QDialog.Accepted:
+            return
+        
+        new_token = dialog.lineEdit.text().strip()
+        if not new_token:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Invalid Token",
+                "Please enter a valid MapBox Token.",
+            )
+            return
+        
+        settings.setValue(self.SETTINGS_KEY, new_token)
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "Token Updated",
+            "Your Mapbox token has been successfully updated.",
+        )
 
     def _populate_point_layers_combo(self):
         self.dlg.layersComboBox.clear()

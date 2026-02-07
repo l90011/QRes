@@ -41,15 +41,24 @@ class ResilientIsochronesDialog(QtWidgets.QDialog, FORM_CLASS):
         # Store facility checkboxes
         self.facility_checkboxes = {}
         
-        # Store refresh callback
+        # Store callbacks
         self.refresh_osm_callback = None
+        self.configure_token_callback = None
         
-        # Expand dialog height to fit checkboxes
-        self.resize(self.width(), 560)
+        # Expand dialog height to fit checkboxes and buttons
+        self.resize(self.width(), 600)
         
-        # Add refresh OSM cache button
+        # Add Configure Mapbox Token button
+        self.configure_token_button = QPushButton("Configure Mapbox Token", self)
+        self.configure_token_button.setGeometry(20, 430, 371, 30)
+        self.configure_token_button.setToolTip(
+            "Update or reconfigure your Mapbox API token"
+        )
+        self.configure_token_button.clicked.connect(self._on_configure_token_clicked)
+        
+        # Add refresh OSM cache button (moved down)
         self.refresh_osm_button = QPushButton("Refresh OSM Data Cache", self)
-        self.refresh_osm_button.setGeometry(20, 430, 371, 30)
+        self.refresh_osm_button.setGeometry(20, 470, 371, 30)
         self.refresh_osm_button.setToolTip(
             "Delete cached OSM data and download fresh data for the study area"
         )
@@ -93,7 +102,7 @@ class ResilientIsochronesDialog(QtWidgets.QDialog, FORM_CLASS):
         facilities_group.setLayout(facilities_layout)
         
         # Move button box down
-        self.button_box.setGeometry(0, 470, 401, 41)
+        self.button_box.setGeometry(0, 510, 401, 41)
     
     def set_refresh_osm_callback(self, callback):
         """Set callback function for refresh OSM button.
@@ -103,10 +112,23 @@ class ResilientIsochronesDialog(QtWidgets.QDialog, FORM_CLASS):
         """
         self.refresh_osm_callback = callback
     
+    def set_configure_token_callback(self, callback):
+        """Set callback function for configure token button.
+        
+        Args:
+            callback: Function to call when configure token button is clicked
+        """
+        self.configure_token_callback = callback
+    
     def _on_refresh_osm_clicked(self):
         """Handle refresh OSM button click."""
         if self.refresh_osm_callback:
             self.refresh_osm_callback()
+    
+    def _on_configure_token_clicked(self):
+        """Handle configure token button click."""
+        if self.configure_token_callback:
+            self.configure_token_callback()
     
     def _select_all_facilities(self):
         """Check all facility checkboxes."""
