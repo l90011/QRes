@@ -195,6 +195,7 @@ class ResilientIsochrones:
 
         self.first_start = None
         self.point_layer = None
+        self.osm_feature_counts = {}  # Track OSM features downloaded/cached
 
     def tr(self, message: str) -> str:
         return QCoreApplication.translate("ResilienceMapper", message)
@@ -421,6 +422,9 @@ class ResilientIsochrones:
                     list(feature_counts.keys())  # Only categories with data
                 )
                 
+                # Store feature counts for display in results
+                self.osm_feature_counts = feature_counts
+                
                 # Log download summary
                 summary = "OSM data downloaded successfully: "
                 summary += ", ".join([f"{cat}={count}" for cat, count in feature_counts.items()])
@@ -440,6 +444,12 @@ class ResilientIsochrones:
             # Cache exists and is valid
             cache_info = cache_manager.get_cache_info()
             logging.info(f"Using existing OSM cache: {cache_info}")
+            
+            # Get feature counts from cached data
+            self.osm_feature_counts = self._get_cached_feature_counts(
+                cache_manager.gpkg_file,
+                selected_facility_keys
+            )
         
         # Initialize local query layer
         local_query = LocalOSMQuery(cache_manager.gpkg_file)
@@ -568,10 +578,32 @@ class ResilientIsochrones:
                 f"See log: {log_file}")
             return
 
+        # Build OSM features summary
+        osm_summary = ""
+        if self.osm_feature_counts:
+            total_osm_features = sum(self.osm_feature_counts.values())
+            osm_summary = f"\n\nOSM Features Used ({total_osm_features} total):\n"
+            # Create a nice formatted list
+            facility_labels = {
+                "schools": "Schools",
+                "kindergarden": "Kindergartens",
+                "transportation": "Transportation",
+                "airports": "Airports",
+                "leisure_and_parks": "Leisure & Parks",
+                "shops": "Shops",
+                "higher_education": "Higher Education",
+                "further_education": "Further Education",
+                "hospitals": "Hospitals"
+            }
+            for cat, count in sorted(self.osm_feature_counts.items()):
+                label = facility_labels.get(cat, cat)
+                osm_summary += f"  • {label}: {count}\n"
+        
         QMessageBox.information(self.iface.mainWindow(), "Operation Complete", 
             f"Processing complete!\n\n"
             f"Time elapsed: {operation_elapsed/60:.1f} minutes ({operation_elapsed:.0f}s)\n"
-            f"Succeeded: {succeeded}\nFailed: {skipped}\n\n"
+            f"Succeeded: {succeeded}\nFailed: {skipped}"
+            f"{osm_summary}\n"
             f"See log: {log_file}")
 
     # ----------------------------
@@ -616,6 +648,49 @@ class ResilientIsochrones:
 
         layer_names.sort(key=lambda s: s.lower())
         self.dlg.layersComboBox.addItems(layer_names)
+
+    def _get_cached_feature_counts(self, gpkg_path: str, categories: list) -> dict:
+        """Get feature counts from cached OSM data.
+        
+        Args:
+            gpkg_path: Path to the GeoPackage file
+            categories: List of category keys to check
+            
+        Returns:
+            Dict mapping category name to feature count
+        """
+        from qgis.core import QgsVectorLayer
+        
+        feature_counts = {}
+        
+        # Map category to table name
+        table_mapping = {
+            "schools": "osm_schools",
+            "kindergarden": "osm_kindergarden",
+            "transportation": "osm_transportation",
+            "airports": "osm_airports",
+            "leisure_and_parks": "osm_leisure_parks",
+            "shops": "osm_shops",
+            "higher_education": "osm_higher_education",
+            "further_education": "osm_further_education",
+            "hospitals": "osm_hospitals",
+        }
+        
+        for category in categories:
+            table_name = table_mapping.get(category)
+            if not table_name:
+                continue
+            
+            # Load layer from GeoPackage
+            layer_uri = f"{gpkg_path}|layername={table_name}"
+            layer = QgsVectorLayer(layer_uri, table_name, "ogr")
+            
+            if layer.isValid():
+                feature_counts[category] = layer.featureCount()
+            else:
+                feature_counts[category] = 0
+        
+        return feature_counts
 
     def _ensure_fields(self):
         """Ensure all possible facility fields exist (not just selected ones)."""
