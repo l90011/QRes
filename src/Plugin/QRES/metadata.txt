@@ -2,7 +2,7 @@
 name=QRES - ResilienceMapper
 qgisMinimumVersion=3.0
 description=Calculates and maps urban resilience values based on isochrone accessibility.
-version=1.0.0
+version=2.0.0
 repository=https://github.com/l90011/QRes
 homepage=https://github.com/l90011/QRes
 tracker=https://github.com/l90011/QRes/issues

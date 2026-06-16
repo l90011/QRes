@@ -6,7 +6,7 @@
  Calculates and maps urban resilience values based on isochrone analysis.
                              -------------------
         begin                : 2023-04-28
-        version              : 1.0.0
+        version              : 2.0.0
         qgisMinimumVersion   : 3.0
         author               : MKS DTECH, Luigi Pintacuda, Silvio Carta, Tommaso Turchi
         email                : l.pintacuda@herts.ac.uk

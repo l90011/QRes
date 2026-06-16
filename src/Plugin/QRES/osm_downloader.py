@@ -75,8 +75,16 @@ class OSMDownloader:
         },
     }
     
-    OVERPASS_URL = "http://overpass-api.de/api/interpreter"
+    OVERPASS_URL = "https://overpass-api.de/api/interpreter"
     OVERPASS_TIMEOUT = 180  # 3 minutes for initial download
+    # Identifiable User-Agent is required by Overpass fair-use rules; a stock
+    # (e.g. default python-requests) User-Agent gets rejected with HTTP 406.
+    # It identifies the app, plugin type, responsible organisation, and a real
+    # contact address. Update this single constant if any of those change.
+    OVERPASS_USER_AGENT = (
+        "QRES-Resilience-Mapper/2.0 (QGIS plugin; "
+        "University of Hertfordshire; contact: qres@herts.ac.uk)"
+    )
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -115,10 +123,17 @@ class OSMDownloader:
         for attempt in range(max_retries):
             try:
                 self.logger.info(f"Querying Overpass API (timeout: {self.OVERPASS_TIMEOUT}s, attempt {attempt + 1}/{max_retries})...")
-                
+
+                headers = {"User-Agent": self.OVERPASS_USER_AGENT}
+                self.logger.info(
+                    f"Overpass request: endpoint={self.OVERPASS_URL} method=POST "
+                    f"custom_user_agent={bool(headers.get('User-Agent'))}"
+                )
+
                 response = requests.post(
                     self.OVERPASS_URL,
                     data={"data": query},
+                    headers=headers,
                     timeout=self.OVERPASS_TIMEOUT + 10
                 )
                 
@@ -151,6 +166,15 @@ class OSMDownloader:
                         self.logger.error(f"Rate limit persists after {max_retries} attempts")
                         return None
                         
+                elif response.status_code == 406:
+                    # Hard fair-use/header rejection - retrying won't help.
+                    self.logger.error(
+                        "Overpass rejected the request (406 Not Acceptable): missing or "
+                        "invalid headers / fair-use rules. Verify the custom User-Agent "
+                        f"is being sent ('{self.OVERPASS_USER_AGENT}')."
+                    )
+                    return None
+
                 elif response.status_code in [504, 503]:
                     # Server timeout/unavailable - wait before retry
                     wait_time = 30 * (attempt + 1)  # 30s, 60s, 90s
@@ -159,7 +183,11 @@ class OSMDownloader:
                         time.sleep(wait_time)
                         continue
                     else:
-                        self.logger.error(f"Server timeout persists after {max_retries} attempts")
+                        self.logger.error(
+                            f"Server timeout ({response.status_code}) persists after "
+                            f"{max_retries} attempts. The query area may be too large - "
+                            "try reducing the study area and retrying."
+                        )
                         return None
                 else:
                     self.logger.error(f"Overpass API returned status {response.status_code}")
