@@ -134,7 +134,7 @@ class OSMDownloader:
                     self.OVERPASS_URL,
                     data={"data": query},
                     headers=headers,
-                    timeout=self.OVERPASS_TIMEOUT + 10
+                    timeout=(10, self.OVERPASS_TIMEOUT + 10)
                 )
                 
                 if response.status_code == 200:
