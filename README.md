@@ -5,6 +5,8 @@ QGIS plugin for mapping urban resilience
 QRES is a QGIS plugin designed to assess the resilience of urban areas by analysing the spatial accessibility of essential features such as schools, parks, hospitals, and public transport.
 Unlike traditional distance-based methods, QRES uses isochrones—areas reachable within equal travel times—to calculate resilience values that better reflect real-world conditions.
 
+Further info: https://www.herts.ac.uk/research/groups-and-units/arch/qres-resilience-mapper-for-qgis
+
 The plugin’s workflow consists of three automated steps:\n
 1. Extract relevant urban features and generate isochrones using Mapbox;
 2. Compute resilience values for each sampled point, considering feature redundancy and accessibility;
